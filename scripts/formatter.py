@@ -249,18 +249,18 @@ def format_cover(doc, zones):
         for row in cover_table.rows:
             cells = row.cells
             if len(cells) >= 2:
-                # 左列：标签列 → 楷体小二号(18pt) 右对齐
+                # 左列：标签列 → 楷体小二号(18pt) 右对齐，不加粗
                 for p in cells[0].paragraphs:
                     for run in p.runs:
                         set_run_font(run, cn_font=FONT_KAI, en_font=FONT_TIMES,
-                                    size=Pt(18), bold=None)
+                                    size=Pt(18), bold=False)
                     set_paragraph_format(p, alignment=WD_ALIGN_PARAGRAPH.RIGHT,
                                         line_spacing=BODY_LINE_SPACING)
-                # 右列：内容列 → 楷体三号(16pt) 居中
+                # 右列：内容列 → 楷体三号(16pt) 居中，不加粗
                 for p in cells[1].paragraphs:
                     for run in p.runs:
                         set_run_font(run, cn_font=FONT_KAI, en_font=FONT_TIMES,
-                                    size=SIZE_SANHAO, bold=None)
+                                    size=SIZE_SANHAO, bold=False)
                     set_paragraph_format(p, alignment=WD_ALIGN_PARAGRAPH.CENTER,
                                         line_spacing=BODY_LINE_SPACING)
 
@@ -717,14 +717,27 @@ def fix_figure_table_numbering(doc, zones):
         # 添加短格式替代：对于 "图2.4.2-1" → 可能被简写为 "图2.4"
         short_forms = {}
         for ok, nk in list(expanded.items()):
+            m = re.match(r'^([图表])([\d])-([\d]+)$', nk)
+            if m:
+                # 新编号 "图2-3" → 可能残留旧格式 "图2.X" 或 "图2.X.X"
+                ch = m.group(2)
+                pass
             # "图2.4.2-1" → short "图2.4"
             m = re.match(r'^([图表])([\d]+)\.([\d]+)', ok)
             if m:
                 sf = f"{m.group(1)}{m.group(2)}.{m.group(3)}"
-                # 只在还没有 mapping 时添加（避免覆盖更精确的）
                 if sf not in expanded:
                     short_forms[sf] = nk
         expanded.update(short_forms)
+
+        # 清理"混合残留"：如 "图2-12.6" → "图2-12"，"表2-3.6.4-1" → "表2-3"
+        for idx in body_indices:
+            p = paragraphs[idx]
+            full = ''.join(r.text for r in p.runs)
+            full, n = re.subn(r'([图表]\d+-\d+)\.\d+(\.\d+)?(-\d+)?', r'\1', full)
+            full, n2 = re.subn(r'至\s*[图表\s]*[\d.\-]+(?=\s|$|。|，|；)', r'', full)
+            if (n + n2) > 0 and p.runs:
+                _run_replace_text(p, full)
 
         sorted_keys = sorted(expanded.keys(), key=len, reverse=True)
 
@@ -882,25 +895,67 @@ def insert_toc(doc):
         ch_pPr.append(pb)
 
 
-def format_formulas(doc, zones):
-    """格式化数学公式段落：居中，(式X.Y)靠右。
+def _apply_formula_tab_stops(p):
+    """设置公式段落的制表位：居中制表位 + 右对齐制表位。
 
-    也纠正公式序号格式：(式4.1) → (式4-1) 等。
+    参考袁颖论文的公式样式：center tab at ~20 char, right tab at ~39 char。
     """
+    pPr = p._element.get_or_add_pPr()
+    # 先移除已有 tabs
+    old_tabs = pPr.findall(qn('w:tabs'))
+    for t in old_tabs:
+        pPr.remove(t)
+
+    tabs = OxmlElement('w:tabs')
+    # 居中制表位
+    ct = OxmlElement('w:tab')
+    ct.set(qn('w:val'), 'center')
+    ct.set(qn('w:pos'), '4536')  # ~315pt, page center for 3.2cm margins
+    tabs.append(ct)
+    # 右制表位（式序靠右）
+    rt = OxmlElement('w:tab')
+    rt.set(qn('w:val'), 'right')
+    rt.set(qn('w:pos'), '9072')  # ~630pt, right margin
+    tabs.append(rt)
+    pPr.append(tabs)
+
+
+def _cleanup_mixed_refs(doc, zones):
+    """最后清理所有混合残留引用：图2-12.6 → 图2-12，表2-3.6.4-1 → 表2-3 等。"""
+    body_indices = zones.get("body", [])
+    paragraphs = doc.paragraphs
+    for idx in body_indices:
+        p = paragraphs[idx]
+        full = ''.join(r.text for r in p.runs)
+        if not full.strip():
+            continue
+        modified = False
+        # "图2-12.6" / "表2-3.6" / "表2-3.6.4-1" → clean suffix
+        full, n = re.subn(r'([图表]\d+-\d+)\.\d+(\.\d+)?(-\d+)?', r'\1', full)
+        if n > 0: modified = True
+        # "至2.4.6.2-11" → remove
+        full, n2 = re.subn(r'至\s*[图表\s]*[\d.\-]+', r'', full)
+        if n2 > 0: modified = True
+        if modified and p.runs:
+            _run_replace_text(p, full)
+
+
+def format_formulas(doc, zones):
+    """格式化数学公式段落：制表位居中 + 式序靠右。"""
     body_indices = zones.get("body", [])
     paragraphs = doc.paragraphs
 
-    # 公式序号模式
     eq_label_pat = re.compile(r'^[\(（]式\s*[\d.\-]+[\)）]$')
 
     for idx in body_indices:
         p = paragraphs[idx]
         text = p.text.strip()
         if eq_label_pat.match(text):
-            # 居中
-            set_paragraph_format(p, alignment=WD_ALIGN_PARAGRAPH.CENTER,
+            # Paragraph alignment can be left — tabs handle the positioning
+            set_paragraph_format(p, alignment=WD_ALIGN_PARAGRAPH.LEFT,
                                 line_spacing=BODY_LINE_SPACING,
                                 first_line_indent=None)
+            _apply_formula_tab_stops(p)
             for run in p.runs:
                 set_run_font(run, cn_font=FONT_SONG, en_font=FONT_TIMES,
                             size=SIZE_XIAOSI)
@@ -1029,6 +1084,10 @@ def main():
     # 9. 公式格式修正（在正文格式之后，避免被覆盖）
     print("  [9/10] 公式格式...")
     format_formulas(doc, zones)
+
+    # 9b. 最终清理混合残留引用
+    print("  [9b/10] 清理残留引用...")
+    _cleanup_mixed_refs(doc, zones)
 
     # 10. 插入目录域
     print("  [10/10] 插入目录域...")
