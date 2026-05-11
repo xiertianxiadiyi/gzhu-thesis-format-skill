@@ -130,26 +130,27 @@ def remove_empty_paragraphs(doc):
 
 
 def format_page_setup(doc):
-    """修正页面设置。"""
+    """修正页面设置（保留横向页面不做修改）。"""
     sections = doc.sections
     if len(sections) >= 1:
-        # 封面页
         sec = sections[0]
-        sec.page_width = Cm(21.0)
-        sec.page_height = Cm(29.7)
-        sec.top_margin = COVER_MARGINS["top"]
-        sec.bottom_margin = COVER_MARGINS["bottom"]
-        sec.left_margin = COVER_MARGINS["left"]
-        sec.right_margin = COVER_MARGINS["right"]
+        # 只修改竖向页面，跳过横向页面
+        if sec.page_width < sec.page_height:
+            sec.page_width = Cm(21.0)
+            sec.page_height = Cm(29.7)
+            sec.top_margin = COVER_MARGINS["top"]
+            sec.bottom_margin = COVER_MARGINS["bottom"]
+            sec.left_margin = COVER_MARGINS["left"]
+            sec.right_margin = COVER_MARGINS["right"]
     if len(sections) >= 2:
-        # 正文页
         sec = sections[1]
-        sec.page_width = Cm(21.0)
-        sec.page_height = Cm(29.7)
-        sec.top_margin = BODY_MARGINS["top"]
-        sec.bottom_margin = BODY_MARGINS["bottom"]
-        sec.left_margin = BODY_MARGINS["left"]
-        sec.right_margin = BODY_MARGINS["right"]
+        if sec.page_width < sec.page_height:
+            sec.page_width = Cm(21.0)
+            sec.page_height = Cm(29.7)
+            sec.top_margin = BODY_MARGINS["top"]
+            sec.bottom_margin = BODY_MARGINS["bottom"]
+            sec.left_margin = BODY_MARGINS["left"]
+            sec.right_margin = BODY_MARGINS["right"]
 
 
 def get_structure_zones(doc):
@@ -268,19 +269,54 @@ def _is_chapter_style(style_name, text):
     """判断是否为章标题样式。"""
     if style_name in ("章标题", "一级标题"):
         return True
-    if style_name == "Normal" and is_heading_paragraph(text) == "chapter":
+    if is_heading_paragraph(text) == "chapter":
         return True
     return False
 
 
-def _is_section_style(style_name):
-    """判断是否为节标题（一级条/二级标题）样式。"""
-    return style_name in ("一级条标题", "二级标题")
+def _is_numbered_heading(text, pattern):
+    """检测 Normal 段落是否为编号标题（如 2.1 工程概况 或 2.1.1 地形、地貌）。
+
+    标题特征：数字编号 + 中文/英文标题文字。排除纯数值+单位（如 0.28 mm）。
+    """
+    m = re.match(pattern, text)
+    if not m:
+        return False
+
+    # 编号后的内容
+    after_num = text[m.end():].strip()
+    if not after_num:
+        return False
+
+    # 纯数值+单位（0.28 mm, 1.5 米）→ 不是标题
+    if re.match(r'^[\d.\-]+\s*(mm|cm|m|km|MPa|kPa|kN|kg|t|℃|%|°|m/s|米|吨)\s*$', after_num):
+        return False
+    if re.match(r'^\d+(\.\d+)?\s*(mm|cm|m|km|MPa|kPa|kN|kg|t|℃|%|°|m/s)\b', after_num):
+        return False
+
+    # 必须有中文内容（实体的标题必然是中文）
+    if not re.search(r'[\u4e00-\u9fff]', after_num):
+        return False
+
+    return True
 
 
-def _is_subsection_style(style_name):
-    """判断是否为小节标题（二级条/三级标题）样式。"""
-    return style_name in ("二级条标题", "三级标题")
+def _is_section_style(style_name, text=""):
+    """判断是否为节标题（1.1 工程概况 或 1.1工程概况）。"""
+    if style_name in ("一级条标题", "二级标题"):
+        return True
+    if style_name == "Normal" and _is_numbered_heading(text, r'^\d+\.\d+\s*'):
+        return True
+    return False
+
+
+def _is_subsection_style(style_name, text=""):
+    """判断是否为小节标题（1.1.1 地形、地貌 或 1.1.1地形、地貌）。"""
+    if style_name in ("二级条标题", "三级标题"):
+        return True
+    if style_name == "Normal" and _is_numbered_heading(text, r'^\d+\.\d+\.\d+\s*'):
+        return True
+    return False
 
 
 def _is_caption_style(style_name):
@@ -314,7 +350,7 @@ def format_body_paragraph(p, is_reference=False):
         return
 
     # ── 节标题（如"1.1 XXX"） ──
-    if _is_section_style(style_name):
+    if _is_section_style(style_name, text):
         for run in p.runs:
             set_run_font(run, cn_font=FONT_HEI, en_font=FONT_TIMES, size=SIZE_XIAOSI)
         set_paragraph_format(p, alignment=WD_ALIGN_PARAGRAPH.LEFT,
@@ -323,7 +359,7 @@ def format_body_paragraph(p, is_reference=False):
         return
 
     # ── 小节标题（如"1.1.1 XXX"） ──
-    if _is_subsection_style(style_name):
+    if _is_subsection_style(style_name, text):
         for run in p.runs:
             set_run_font(run, cn_font=FONT_HEI, en_font=FONT_TIMES, size=SIZE_XIAOSI)
         set_paragraph_format(p, alignment=WD_ALIGN_PARAGRAPH.LEFT,
@@ -385,6 +421,8 @@ def _add_blank_before_headings(doc, zones):
     paragraphs = list(doc.paragraphs)  # snapshot
     body_elem = paragraphs[body_indices[0]]._element.getparent()
 
+    # 从后往前处理，避免插入后索引失效
+    heading_positions = []
     for idx in body_indices:
         p = paragraphs[idx]
         text = p.text.strip()
@@ -392,26 +430,25 @@ def _add_blank_before_headings(doc, zones):
             continue
         s = p.style.name
 
-        # 判断是否为需要前空行的标题类型
-        is_heading = _is_chapter_style(s, text) or _is_section_style(s) \
-                     or _is_subsection_style(s) or _is_caption_style(s)
+        is_heading = _is_chapter_style(s, text) or _is_section_style(s, text) \
+                     or _is_subsection_style(s, text) or _is_caption_style(s)
         if not is_heading:
             continue
-        # 如果"参考文献"或"致谢"本身也是独立章标题，也需要前空行
-        # 但参考文献条目（正文111样式）不需要
 
-        # 检查前面段落是否已经是空行
         if idx > 0:
             prev_p = paragraphs[idx - 1]
             if prev_p.text.strip():
-                # 在此段前插入一个空行
-                empty_p = OxmlElement('w:p')
-                body_elem.insert(
-                    list(body_elem).index(p._element),
-                    empty_p
-                )
-                # 更新 zones（插入后索引会变，需要重建）
-                # 但这里不重建，因为后续的循环会处理
+                heading_positions.append(idx)
+
+    # 从后往前插入，避免索引偏移
+    for idx in reversed(heading_positions):
+        p = paragraphs[idx]
+        if p._element.getparent() is not None:
+            empty_p = OxmlElement('w:p')
+            body_elem.insert(
+                list(body_elem).index(p._element),
+                empty_p
+            )
 
 
 def format_body(doc, zones):
@@ -863,6 +900,8 @@ def main():
     # 6. 标题前空行 + 正文格式（含章标题分页）
     print("  [6/10] 标题前空行...")
     _add_blank_before_headings(doc, zones)
+    # 重建 zones（段落被插入后索引已变）
+    zones = get_structure_zones(doc)
     print("  [7/10] 正文格式...")
     format_body(doc, zones)
 
