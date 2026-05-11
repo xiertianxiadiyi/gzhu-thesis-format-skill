@@ -6,7 +6,7 @@
 
 如果你在用 Claude Code 或其他支持 skill 的 agent，直接让它帮你搞定：
 
-> **"运行clone gzhu-thesis-format-skill](https://github.com/xiertianxiadiyi/gzhu-thesis-format-skill.git ，将其添加为 skill，然后帮我修正论文格式"**
+> **"https://github.com/xiertianxiadiyi/gzhu-thesis-format-skill.git ，将其添加为 skill，然后帮我修正论文格式"**
 
 
 
