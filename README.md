@@ -4,20 +4,11 @@
 
 ## 最简单的用法（推荐）
 
-如果你在用 Claude Code 或其他支持 skill 的 AI 编程助手，直接让它帮你搞定：
+如果你在用 Claude Code 或其他支持 skill 的 agent，直接让它帮你搞定：
 
-> **"clone gzhu-thesis-format-skill 这个仓库，添加为 skill，然后帮我修正论文格式"**
+> **"运行clone gzhu-thesis-format-skill](https://github.com/xiertianxiadiyi/gzhu-thesis-format-skill.git ，将其添加为 skill，然后帮我修正论文格式"**
 
-AI 助手会自动完成以下几步：
 
-```bash
-# 1. 克隆仓库到 skills 目录
-git clone https://github.com/xiertianxiadiyi/gzhu-thesis-format-skill.git \
-    ~/.claude/skills/gzhu-thesis-format-skill/
-
-# 2. 让它读取你的论文文件
-# 3. 自动运行格式修正
-```
 
 之后你只需要把论文发给它，说一声"帮我修格式"，它就能自己跑 `formatter.py` 把论文整好。
 
