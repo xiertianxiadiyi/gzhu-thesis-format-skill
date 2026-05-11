@@ -568,17 +568,57 @@ def format_acknowledgement(doc, zones):
                                 first_line_indent=BODY_INDENT)
 
 
+def _run_replace_text(p, new_text):
+    """替换段落的全部文本（保留 drawing 等非文本元素）。"""
+    if not p.runs:
+        return
+    for run in p.runs:
+        if run.text.strip():
+            t_elems = run._element.findall(
+                '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')
+            if t_elems:
+                t_elems[0].text = new_text
+                for te in t_elems[1:]:
+                    te.text = ''
+            else:
+                run.text = new_text
+            break
+    found_first = False
+    for run in p.runs:
+        if run.text.strip() and not found_first:
+            found_first = True
+            continue
+        if run.text.strip():
+            t_elems = run._element.findall(
+                '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')
+            for te in t_elems:
+                te.text = ''
+
+
+def _replace_text_in_paragraph(p, old_text, new_text):
+    """在段落中替换指定文本（跨 run 替换）。"""
+    full = ''.join(r.text for r in p.runs)
+    if old_text not in full:
+        return False
+    new_full = full.replace(old_text, new_text)
+    if p.runs:
+        # 简单方案：所有文本写入第一个 run
+        t_elems = p.runs[0]._element.findall(
+            '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')
+        if t_elems:
+            t_elems[0].text = new_full
+        else:
+            p.runs[0].text = new_full
+    return True
+
+
 def fix_figure_table_numbering(doc, zones):
-    """修正图序表序：将节序号格式改为章序号-序号格式。
+    """修正图序表序、文中引用、公式格式。
 
-    例如: 图2.1.2 检索增强生成（RAG）系统工作流程图
-       -> 图2-2 检索增强生成（RAG）系统工作流程图
-
-    逻辑:
-    1. 扫描所有章标题(一级标题/章标题)，记录章序号及其后内容范围
-    2. 在每个章的范围内，对图/表题注重新编号
-    3. 图序格式: 图{章号}-{该章的第几张图}
-    4. 表序格式: 表{章号}-{该章的第几个表}
+    1. 图序: 图X.X.X 或 图X.X.X-Y → 图X-N
+    2. 表序: 表X.X.X 或 表X.X.X-Y → 表X-N
+    3. 文中引用: 如 "表X.X" → "表X-N" 同步修正
+    4. 公式: 居中, 式序保持 (式X.Y) 或转为 (式X-N)
     """
     body_indices = zones.get("body", [])
     if not body_indices:
@@ -586,25 +626,40 @@ def fix_figure_table_numbering(doc, zones):
 
     paragraphs = doc.paragraphs
 
-    # Step 1: 找出章标题和其所属段落范围
-    chapter_starts = []  # (para_index, chapter_label, chapter_number)
-    ch_pattern = re.compile(r'^(\d+)\s+')
+    # Step 1: 找出章标题
+    chapter_starts = []
+    cn_num_map = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10}
     for idx in body_indices:
         p = paragraphs[idx]
         text = p.text.strip()
-        if _is_chapter_style(p.style.name, text):
-            m = ch_pattern.match(text)
-            if m:
-                chapter_starts.append((idx, text, int(m.group(1))))
-            elif text in ("参考文献", "致谢"):
-                continue  # skip backmatter
+        if not _is_chapter_style(p.style.name, text):
+            continue
+        if text in ("参考文献", "致谢"):
+            continue
+
+        ch_num = 0
+        # "第一章 xxx" or "第1章 xxx"
+        m1 = re.match(r'^第\s*([一二三四五六七八九十\d]+)\s*章\b', text)
+        if m1:
+            ns = m1.group(1)
+            ch_num = cn_num_map.get(ns, int(ns) if ns.isdigit() else 0)
+        else:
+            # "1 前言" / "1 xxx"
+            m2 = re.match(r'^(\d+)\s+', text)
+            if m2:
+                ch_num = int(m2.group(1))
+
+        if ch_num > 0:
+            chapter_starts.append((idx, text, ch_num))
 
     if not chapter_starts:
         return
 
-    # Step 2: 在每个章节范围内修正图/表编号
+    # Step 2: 建立章节 → 图/表序号映射
+    # 同时还建立旧编号 → 新编号的映射表
+    old_to_new = {}   # "图2.4.2-1" → " 图2-?  XXX"
+
     for ci, (ch_start, ch_text, ch_num) in enumerate(chapter_starts):
-        # Determine range end
         if ci + 1 < len(chapter_starts):
             ch_end = chapter_starts[ci + 1][0]
         else:
@@ -612,7 +667,8 @@ def fix_figure_table_numbering(doc, zones):
 
         fig_count = 0
         tbl_count = 0
-        cap_pattern = re.compile(r'^(图|表)\s*[\d.]+\s*(.+)')
+        # 匹配图/表题注: 图/表 + 编号（可含.和-） + 可选空格 + 标题文字
+        cap_pattern = re.compile(r'^(图|表)\s*([\d]+(?:[.\-][\d]+)*)\s*(.+)')
 
         for pi in range(ch_start + 1, ch_end):
             p = paragraphs[pi]
@@ -621,47 +677,84 @@ def fix_figure_table_numbering(doc, zones):
             if not m:
                 continue
 
-            prefix = m.group(1)  # "图" or "表"
-            rest = m.group(2)    # the text after the number
+            prefix = m.group(1)
+            old_num = m.group(2)
+            rest = m.group(3)
+
+            # 过滤误匹配：正文"表2.4判别结果显示..." → 是正文不是题注
+            # 题注特征：以名词/专有名词/英文/符号开头，不是以动词/连词开头
+            if re.match(r'^(判别|结果|显示|表明|可知|可以|得出|为不|可|本|该|其|与|并|且|但|而)', rest):
+                continue
+            # 题注通常30字以内
+            if len(rest) > 30:
+                continue
 
             if prefix == "图":
                 fig_count += 1
-                new_num = f"{prefix}{ch_num}-{fig_count}"
+                new_num = f"{ch_num}-{fig_count}"
             else:
                 tbl_count += 1
-                new_num = f"{prefix}{ch_num}-{tbl_count}"
+                new_num = f"{ch_num}-{tbl_count}"
 
-            # 只修改小节号格式 -> 改为章-序号格式
-            new_text = f"{new_num} {rest}"
+            old_key = f"{prefix}{old_num}"
+            new_key = f"{prefix}{new_num}"
+            old_to_new[old_key] = (new_key, rest)
 
-            # 写回文本到 runs（保留 drawing 元素）
-            # 先合并所有文本，找到需要修改的位置
-            if p.runs:
-                # 找到第一个包含可见文本的 run 并替换其文本
-                for run in p.runs:
-                    if run.text.strip():
-                        # 保留 drawing 等子元素，只替换 w:t 节点的文本
-                        t_elems = run._element.findall(
-                            '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')
-                        if t_elems:
-                            t_elems[0].text = new_text
-                            # 清空后续 t 节点
-                            for te in t_elems[1:]:
-                                te.text = ''
-                        else:
-                            run.text = new_text
-                        break
-                # 清空其他 run 的文本（保留 drawing 等非文本子元素）
-                found_first = False
-                for run in p.runs:
-                    if run.text.strip() and not found_first:
-                        found_first = True
-                        continue
-                    if run.text.strip():
-                        t_elems = run._element.findall(
-                            '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')
-                        for te in t_elems:
-                            te.text = ''
+            new_text = f"{new_key} {rest}"
+            _run_replace_text(p, new_text)
+
+    # Step 3: 修正文中引用
+    if old_to_new:
+        # 也加入带空格的变体（"表 4.1" → "表4-1"）
+        expanded = {}
+        for ok, (nk, _) in old_to_new.items():
+            expanded[ok] = nk
+            if re.match(r'^(图|表)(\d)', ok):
+                m = re.match(r'^([图表])([\d].*)', ok)
+                if m:
+                    expanded[f"{m.group(1)} {m.group(2)}"] = nk
+
+        # 添加短格式替代：对于 "图2.4.2-1" → 可能被简写为 "图2.4"
+        short_forms = {}
+        for ok, nk in list(expanded.items()):
+            # "图2.4.2-1" → short "图2.4"
+            m = re.match(r'^([图表])([\d]+)\.([\d]+)', ok)
+            if m:
+                sf = f"{m.group(1)}{m.group(2)}.{m.group(3)}"
+                # 只在还没有 mapping 时添加（避免覆盖更精确的）
+                if sf not in expanded:
+                    short_forms[sf] = nk
+        expanded.update(short_forms)
+
+        sorted_keys = sorted(expanded.keys(), key=len, reverse=True)
+
+        for idx in body_indices:
+            p = paragraphs[idx]
+            text = p.text.strip()
+            if not text:
+                continue
+
+            full = ''.join(r.text for r in p.runs)
+            modified = False
+            for old_key in sorted_keys:
+                if old_key in full:
+                    new_key = expanded[old_key]
+                    full = full.replace(old_key, new_key)
+                    modified = True
+            if modified and p.runs:
+                _run_replace_text(p, full)
+
+    # Step 4: 公式格式化（居中，式序靠右）
+    # 式序写法: (式4.1), (式4.1), (4.1) 等 → 公式段落居中
+    formula_pattern = re.compile(r'^[\(（]式\s*[\d.\-]+[\)）]$')
+    for idx in body_indices:
+        p = paragraphs[idx]
+        text = p.text.strip()
+        if formula_pattern.match(text):
+            set_paragraph_format(p, alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                                line_spacing=BODY_LINE_SPACING)
+            for run in p.runs:
+                set_run_font(run, cn_font=FONT_SONG, en_font=FONT_TIMES, size=SIZE_XIAOSI)
 
 
 SIZE_XIAOER = Pt(18)   # 小二
@@ -789,6 +882,30 @@ def insert_toc(doc):
         ch_pPr.append(pb)
 
 
+def format_formulas(doc, zones):
+    """格式化数学公式段落：居中，(式X.Y)靠右。
+
+    也纠正公式序号格式：(式4.1) → (式4-1) 等。
+    """
+    body_indices = zones.get("body", [])
+    paragraphs = doc.paragraphs
+
+    # 公式序号模式
+    eq_label_pat = re.compile(r'^[\(（]式\s*[\d.\-]+[\)）]$')
+
+    for idx in body_indices:
+        p = paragraphs[idx]
+        text = p.text.strip()
+        if eq_label_pat.match(text):
+            # 居中
+            set_paragraph_format(p, alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                                line_spacing=BODY_LINE_SPACING,
+                                first_line_indent=None)
+            for run in p.runs:
+                set_run_font(run, cn_font=FONT_SONG, en_font=FONT_TIMES,
+                            size=SIZE_XIAOSI)
+
+
 def format_tables(doc):
     """修正正文表格内文字格式（跳过封面表格）。"""
     for ti, table in enumerate(doc.tables):
@@ -889,7 +1006,7 @@ def main():
     print("  [3/10] 封面格式...")
     format_cover(doc, zones)
 
-    # 4. 图序表序修正（可在 SKILL.md 中查看说明）
+    # 4. 图序表序修正 + 公式格式
     print("  [4/10] 图序表序修正...")
     fix_figure_table_numbering(doc, zones)
 
@@ -909,17 +1026,21 @@ def main():
     print("  [8/10] 致谢格式...")
     format_acknowledgement(doc, zones)
 
-    # 9. 插入目录域
-    print("  [9/10] 插入目录域...")
+    # 9. 公式格式修正（在正文格式之后，避免被覆盖）
+    print("  [9/10] 公式格式...")
+    format_formulas(doc, zones)
+
+    # 10. 插入目录域
+    print("  [10/10] 插入目录域...")
     insert_toc(doc)
 
-    # 10. 表格格式 + 页眉页脚
-    print("  [10/10] 表格格式...")
+    # 11. 表格格式 + 页眉页脚
+    print("  [11/11] 表格格式...")
     format_tables(doc)
     format_headers_footers(doc)
 
-    # 11. 页码
-    print("  [11/11] 页码...")
+    # 12. 页码
+    print("  [12/12] 页码...")
     format_page_numbers(doc)
 
     # 保存
