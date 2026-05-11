@@ -940,18 +940,124 @@ def _cleanup_mixed_refs(doc, zones):
             _run_replace_text(p, full)
 
 
+def _is_formula_content(p):
+    """判断段落是否为公式内容（非标题、非正文段落）。
+
+    公式内容特征：以数学符号/变量开头，或上一段是(式X.Y)标签段落。
+    """
+    text = p.text.strip()
+    if not text:
+        return False
+    # 不是章/节/小节标题，不是图表题注，不是普通长文本正文
+    if _is_chapter_style(p.style.name, text):
+        return False
+    if _is_section_style(p.style.name, text):
+        return False
+    if _is_subsection_style(p.style.name, text):
+        return False
+    if _is_caption_style(p.style.name):
+        return False
+    if re.match(r'^[\(（]式', text):
+        return False
+    # 文字太长的是正文
+    if len(text) > 80:
+        return False
+    return True
+
+
 def format_formulas(doc, zones):
-    """格式化数学公式段落：制表位居中 + 式序靠右。"""
+    """格式化数学公式段落：合并公式内容 + 式序到同一段，制表位居中 + 式序靠右。
+
+    原作者常把公式内容和式序分两段写。此函数将它们合并为正确格式：
+    {tab}公式内容{tab}（式X.Y）
+    """
     body_indices = zones.get("body", [])
     paragraphs = doc.paragraphs
-
     eq_label_pat = re.compile(r'^[\(（]式\s*[\d.\-]+[\)）]$')
 
+    # Pass 1: 找到式序号段落，合并上一段
+    merge_pairs = []
     for idx in body_indices:
         p = paragraphs[idx]
         text = p.text.strip()
+        if not eq_label_pat.match(text):
+            continue
+        if idx == 0:
+            continue
+        prev = paragraphs[idx - 1]
+        prev_text = prev.text.strip()
+        # 跳过：上一段也是式序、空段、长正文(>80字)
+        if not prev_text:
+            continue
+        if eq_label_pat.match(prev_text):
+            continue
+        if len(prev_text) > 80:
+            continue
+        # 上一段是图表题注也跳过
+        if re.match(r'^(图|表)\d', prev_text):
+            continue
+        merge_pairs.append((idx - 1, idx, text))
+
+    # 从后往前合并
+    for prev_idx, label_idx, label_text in reversed(merge_pairs):
+        prev = paragraphs[prev_idx]
+        label_p = paragraphs[label_idx]
+
+        # 获取公式内容文本
+        content_text = ''.join(r.text for r in prev.runs).strip()
+
+        # 用 OxmlElement 创建新的干净 run
+        # 完全清除 label_p 中的所有子元素（包括旧 run 和 pPr）
+        for child in list(label_p._element):
+            if child.tag != '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr':
+                label_p._element.remove(child)
+
+        # 创建新 run: tab + content + tab + label
+        new_run = OxmlElement('w:r')
+        rPr = OxmlElement('w:rPr')
+        rFonts = OxmlElement('w:rFonts')
+        rFonts.set(qn('w:eastAsia'), FONT_SONG)
+        rFonts.set(qn('w:ascii'), FONT_TIMES)
+        rPr.append(rFonts)
+        sz = OxmlElement('w:sz')
+        sz.set(qn('w:val'), str(int(SIZE_XIAOSI / 6350)))
+        rPr.append(sz)
+        new_run.append(rPr)
+
+        # tab 元素
+        tab1 = OxmlElement('w:tab')
+        new_run.append(tab1)
+        # 公式内容
+        t1 = OxmlElement('w:t')
+        t1.set('{http://schemas.xmlsoap.org/XML/1998/namespace}space', 'preserve')
+        t1.text = ' ' + content_text + ' '
+        new_run.append(t1)
+        # tab
+        tab2 = OxmlElement('w:tab')
+        new_run.append(tab2)
+        # 式序
+        t2 = OxmlElement('w:t')
+        t2.set('{http://schemas.xmlsoap.org/XML/1998/namespace}space', 'preserve')
+        t2.text = label_text
+        new_run.append(t2)
+
+        label_p._element.append(new_run)
+
+        # 删除公式内容段
+        prev._element.getparent().remove(prev._element)
+
+        # 重建 paragraphs 引用
+        paragraphs = doc.paragraphs
+
+    # Pass 2: 格式化所有公式段落
+    paragraphs = doc.paragraphs
+    body_indices = zones.get("body", [])
+    for idx in body_indices:
+        if idx >= len(paragraphs):
+            continue
+        p = paragraphs[idx]
+        text = p.text.strip()
         if eq_label_pat.match(text):
-            # Paragraph alignment can be left — tabs handle the positioning
             set_paragraph_format(p, alignment=WD_ALIGN_PARAGRAPH.LEFT,
                                 line_spacing=BODY_LINE_SPACING,
                                 first_line_indent=None)
