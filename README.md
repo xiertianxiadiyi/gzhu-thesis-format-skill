@@ -2,6 +2,27 @@
 
 基于[广州大学学生毕业论文（设计）模板(中文)]，自动修正论文格式，把格式一团乱的论文变成符合学校要求的规范样子。
 
+## 最简单的用法（推荐）
+
+如果你在用 Claude Code 或其他支持 skill 的 AI 编程助手，直接让它帮你搞定：
+
+> **"clone gzhu-thesis-format-skill 这个仓库，添加为 skill，然后帮我修正论文格式"**
+
+AI 助手会自动完成以下几步：
+
+```bash
+# 1. 克隆仓库到 skills 目录
+git clone https://github.com/xiertianxiadiyi/gzhu-thesis-format-skill.git \
+    ~/.claude/skills/gzhu-thesis-format-skill/
+
+# 2. 让它读取你的论文文件
+# 3. 自动运行格式修正
+```
+
+之后你只需要把论文发给它，说一声"帮我修格式"，它就能自己跑 `formatter.py` 把论文整好。
+
+如果你不用 AI 助手，也可以自己手动跑脚本。
+
 ## 能做什么
 
 | 功能 | 说明 |
