@@ -376,6 +376,44 @@ def format_body_paragraph(p, is_reference=False):
                         first_line_indent=BODY_INDENT)
 
 
+def _add_blank_before_headings(doc, zones):
+    """确保每个标题前都有一个空行（章/节/小节标题前均需空行）。"""
+    body_indices = zones.get("body", [])
+    if not body_indices:
+        return
+
+    paragraphs = list(doc.paragraphs)  # snapshot
+    body_elem = paragraphs[body_indices[0]]._element.getparent()
+
+    for idx in body_indices:
+        p = paragraphs[idx]
+        text = p.text.strip()
+        if not text:
+            continue
+        s = p.style.name
+
+        # 判断是否为需要前空行的标题类型
+        is_heading = _is_chapter_style(s, text) or _is_section_style(s) \
+                     or _is_subsection_style(s) or _is_caption_style(s)
+        if not is_heading:
+            continue
+        # 如果"参考文献"或"致谢"本身也是独立章标题，也需要前空行
+        # 但参考文献条目（正文111样式）不需要
+
+        # 检查前面段落是否已经是空行
+        if idx > 0:
+            prev_p = paragraphs[idx - 1]
+            if prev_p.text.strip():
+                # 在此段前插入一个空行
+                empty_p = OxmlElement('w:p')
+                body_elem.insert(
+                    list(body_elem).index(p._element),
+                    empty_p
+                )
+                # 更新 zones（插入后索引会变，需要重建）
+                # 但这里不重建，因为后续的循环会处理
+
+
 def format_body(doc, zones):
     """修正正文格式。"""
     body_indices = zones.get("body", [])
@@ -822,25 +860,27 @@ def main():
     print("  [5/10] 摘要格式...")
     format_abstract(doc, zones)
 
-    # 6. 正文格式（含章标题分页）
-    print("  [6/10] 正文格式...")
+    # 6. 标题前空行 + 正文格式（含章标题分页）
+    print("  [6/10] 标题前空行...")
+    _add_blank_before_headings(doc, zones)
+    print("  [7/10] 正文格式...")
     format_body(doc, zones)
 
-    # 7. 致谢格式
-    print("  [7/10] 致谢格式...")
+    # 8. 致谢格式
+    print("  [8/10] 致谢格式...")
     format_acknowledgement(doc, zones)
 
-    # 8. 插入目录域
-    print("  [8/10] 插入目录域...")
+    # 9. 插入目录域
+    print("  [9/10] 插入目录域...")
     insert_toc(doc)
 
-    # 9. 表格格式
-    print("  [9/10] 表格格式...")
+    # 10. 表格格式 + 页眉页脚
+    print("  [10/10] 表格格式...")
     format_tables(doc)
     format_headers_footers(doc)
 
-    # 10. 页码
-    print("  [10/10] 页码...")
+    # 11. 页码
+    print("  [11/11] 页码...")
     format_page_numbers(doc)
 
     # 保存
