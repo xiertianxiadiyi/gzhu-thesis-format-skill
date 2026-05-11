@@ -975,7 +975,7 @@ def format_formulas(doc, zones):
     paragraphs = doc.paragraphs
     eq_label_pat = re.compile(r'^[\(（]式\s*[\d.\-]+[\)）]$')
 
-    # Pass 1: 找到式序号段落，合并上一段
+    # Pass 1: 找到式序号段落，尝试合并上一段
     merge_pairs = []
     for idx in body_indices:
         p = paragraphs[idx]
@@ -986,16 +986,22 @@ def format_formulas(doc, zones):
             continue
         prev = paragraphs[idx - 1]
         prev_text = prev.text.strip()
-        # 跳过：上一段也是式序、空段、长正文(>80字)
+        # 跳过空段、另一个式序、图表题注
         if not prev_text:
             continue
         if eq_label_pat.match(prev_text):
             continue
-        if len(prev_text) > 80:
-            continue
-        # 上一段是图表题注也跳过
         if re.match(r'^(图|表)\d', prev_text):
             continue
+        # 跳过明显是标题的（如 "4.2.3竖向土压"、"4.2.9拱底反力"）
+        if _is_section_style(prev.style.name, prev_text):
+            continue
+        if _is_subsection_style(prev.style.name, prev_text):
+            continue
+        # 跳过过长（>60字无明显公式特征）
+        if len(prev_text) > 60 and '=' not in prev_text and 'σ' not in prev_text:
+            continue
+        # 保留短文本或包含公式符号的文本
         merge_pairs.append((idx - 1, idx, text))
 
     # 从后往前合并
